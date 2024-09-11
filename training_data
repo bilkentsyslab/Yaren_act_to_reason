@@ -219,6 +219,56 @@ def collision_check(frame_id,ego_df):
 def translate_car0_state(ego_state):
     return Params.car0_states[ego_state]
 
+
+def remember_frame(currentstate, actionget, nextstate, reward, done, 
+                       ego_reached_end, state_size, dynamic_actionget = None):
+        """
+        Appends a given transition to the memory
+
+        Parameters
+        ----------
+        currentstate : numpy array
+            Current state of the ego.
+        actionget : int
+            Current driving action of the ego.
+        dynamic_actionget : int
+            Current level-k action of the dynamic ego.
+        nextstate : numpy array
+            Next state of the ego.
+        reward : float
+            Reward taken with the current action.
+        done : bool
+            True if ego is in a collision.
+        ego_reached_end : bool
+            True if ego reached the end.
+        state_size : int
+            Size of the state, i.e. the input layer.
+
+        Returns
+        -------
+        None.
+
+        """
+        # Dynamic ego
+        temp_nextstate = nextstate.copy()
+        nextstate = currentstate.copy()
+        if Params.dynamic_history_action:
+            scale_action = 1.0 if not Params.scale_action else (Params.num_actions-1.0)
+            nextstate_concat = np.concatenate((nextstate[0,0,:Params.num_actions].copy(),
+                                                [actionget/scale_action],
+                                                nextstate[0,0,Params.num_actions:-state_size].copy()))
+            nextstate[0,0,Params.num_actions:] = nextstate_concat
+        else:
+            nextstate[0,0,Params.num_actions:] = nextstate[0,0,:-Params.num_actions].copy()
+        nextstate[:,:, :Params.num_actions] = temp_nextstate.copy()
+        DYNAMIC_AGENT.remember(currentstate, 
+                                        dynamic_actionget, 
+                                        reward, nextstate, 
+                                        (done or ego_reached_end))
+    
+        
+
+
 def update_motion(ego_df, frame_id,act):
     
     ego_class_id = ego_df['Vehicle_Class_ID'].iloc[-1]
@@ -290,7 +340,7 @@ def update_motion(ego_df, frame_id,act):
                                 "Mean_Accel": acc,
                                 "Vehicle_Length": ego_len,
                                 "Vehicle_Class_ID": ego_class_id, 
-                                "Follower_ID": ego_follower_id,
+                                "Follower_ID": ego_follower_id,  #TODO
                                 "Leader_ID": ego_leader_id}, ignore_index=True);
         ego_vel = new_vel
         
@@ -326,7 +376,13 @@ def get_real_final_step():
 #    
 #    SECTION_DF = EPISODE_DF.loc[(EPISODE_DF['Frame_ID']>=start_frame)&(EPISODE_DF['Frame_ID']<(start_frame+SECTION_DUR*SAMPLING_FREQ))]
     
-def run_episode(final_state_df, run_no, save_dir=""): 
+def run_episode(final_state_df,  state_no, run_no, save_dir="", ): 
+    ego_dyn_state = np.zeros((1,1,DYNAMIC_STATE_SIZE))
+    hist_action_size = int(Params.dynamic_history_action)
+    counter = 0
+    total_timesteps = 0 
+    state_size = 10
+    state_no = state_no
     actionget = 0
     ego_df_columns = EGO_DF_DYN_COLS                    
     new_episode_df = EPISODE_DF.copy()
@@ -340,7 +396,6 @@ def run_episode(final_state_df, run_no, save_dir=""):
     for frame_id in frames:
         if not(frame_id == frames.iloc[0]) and 0 < frame_id - prev_frame_id < SKIP_FRAMES:
             continue
-        
         if frame_id == frames.iloc[0]:
             ego_position = ego_df['Local_Y'].item()
             ego_lane = ego_df['Lane_ID'].item()
@@ -351,12 +406,31 @@ def run_episode(final_state_df, run_no, save_dir=""):
             currentstate_list = get_Message(frame_id=frame_id, ego_current_df=ego_df.iloc[[-1]], normalize=True) #state of the ego car
 
         currentstate = np.reshape(currentstate_list, [1, 1, STATE_SIZE])
+
+        if (Params.start_merging_point + ego_len) < ego_position < Params.end_merging_point and ego_lane == 0:
+            remove_merging = False
+        else:
+            remove_merging = True
+        
+        if Params.dynamic_history_action:
+            scale_action = 1.0 if not Params.scale_action else (Params.num_actions-1.0)
+            ego_dyn_state[0,0,STATE_SIZE:] = np.concatenate((
+                                    ego_dyn_state[0, 0, :STATE_SIZE:].copy(),[actionget/scale_action],
+                                    ego_dyn_state[0,0,STATE_SIZE:-state_size].copy()))
+        else:
+            ego_dyn_state[0,0,STATE_SIZE:] = ego_dyn_state[0,0,:-STATE_SIZE:].copy()
+        ego_dyn_state[0,0,0:STATE_SIZE] = currentstate[0,0,:].copy() # fill in current actions
+        if counter == 0:
+            for s_i in range(Params.dynamic_history,1,-1):
+                idx_1 = ((s_i-1)*state_size-hist_action_size)
+                idx_2 = s_i*state_size-2*hist_action_size
+                ego_dyn_state[0,0,idx_1:idx_2] = currentstate[0,0,:].copy()
+        currentstate = ego_dyn_state.copy()
                
         if (Params.start_merging_point + ego_len) < ego_position < Params.end_merging_point and ego_lane == 0:
             remove_merging = False
         else:
             remove_merging = True
-        counter = 0
         reward = 0 
         ego_info = DYNAMIC_AGENT.act(state=currentstate, remove_merging=remove_merging, get_qvals=False) #action taken by the ego car
         dynamic_q_values = ego_info[0][1]
@@ -367,21 +441,21 @@ def run_episode(final_state_df, run_no, save_dir=""):
         actionget = ego_info[1][1]
 
         # Level-1 Model Output
-        q_values1 = ego_info[1][0][1]
+        #q_values1 = ego_info[1][0][1]
         # Level-2 Model Output
-        q_values2 = ego_info[1][1][1]
+        #q_values2 = ego_info[1][1][1]
         # Level-3 Model Output
-        q_values3 = ego_info[1][2][1]
+        #q_values3 = ego_info[1][2][1]
         # Driving Action
 
 
         #Take action and update state
-        ego_reached_end, ego_df = update_motion(ego_df = ego_df, frame_id = frame_id, act = actionget)
+        ego_reached_end, ego_df = update_motion(ego_df = ego_df, frame_id = frame_id, act = actionget) #6 ROWS
+        nextstate = get_Message(frame_id,ego_df.iloc[-1],normalize=True)
         [done,ego_state] = collision_check(frame_id = frame_id, ego_df = ego_df) #Checks whether a crash occured
-        reward = State.get_reward( ego_reached_end,  ego_state)
+        reward = 3 #State.get_reward( ego_reached_end,  ego_state) #TODO
 
         total_timesteps += 1
-        counter+=1
         
         if not done and ego_reached_end:
             ego_state = 4
@@ -389,21 +463,21 @@ def run_episode(final_state_df, run_no, save_dir=""):
         for new_frame_id in range(frame_id+1,frame_id+SKIP_FRAMES+1):
             df_index = new_episode_df.index[(new_episode_df['Frame_ID']==new_frame_id) & (new_episode_df['Vehicle_ID']==EGO_ID)]
             ego_row = ego_df.loc[ego_df['Frame_ID']==new_frame_id]
-            new_episode_df.at[df_index,'Lane_ID']=ego_row.Lane_ID.item()
-            new_episode_df.at[df_index,'Local_Y']=ego_row.Local_Y.item()
-            new_episode_df.at[df_index,'Mean_Speed']=ego_row.Mean_Speed.item()
-            new_episode_df.at[df_index,'Mean_Accel']=ego_row.Mean_Accel.item()
+            new_episode_df.at[df_index[0],'Lane_ID']=ego_row.Lane_ID.item()
+            new_episode_df.at[df_index[0],'Local_Y']=ego_row.Local_Y.item()
+            new_episode_df.at[df_index[0],'Mean_Speed']=ego_row.Mean_Speed.item()
+            new_episode_df.at[df_index[0],'Mean_Accel']=ego_row.Mean_Accel.item()
 
         # Breaks the episode if ego cars crashes
         if ego_state != 1:
-            nextstate = np.reshape(nextstate, [1, 1,Params.state_size])  
-            Training.remember_frame(currentstate = currentstate, 
+            nextstate = np.reshape(nextstate, [1, 1,  Params.num_observations])  
+            remember_frame(currentstate = currentstate, 
                                             actionget = actionget,
                                             nextstate = nextstate,
                                             reward = reward,
                                             done = done,
                                             ego_reached_end = ego_reached_end,
-                                            state_size = Params.state_size,
+                                            state_size = Params.num_observations,
                                             dynamic_actionget = dynamic_actionget)
             current_training_loss = 0
             if total_timesteps > Training.replay_start_size and total_timesteps % 4 == 0:
@@ -435,6 +509,7 @@ def run_episode(final_state_df, run_no, save_dir=""):
         
         prev_frame_id = frame_id
 
+
     if  not done:
         print("****************************************")
         print("Ego completed episode on time at step " + str(frame_id+SKIP_FRAMES))
@@ -445,25 +520,24 @@ def run_episode(final_state_df, run_no, save_dir=""):
             print("Ego DID NOT reach the end")
         print("****************************************"+'\n', end = '\n')   
 
-    episode_no += 1
     DynamicDQNAgent.update_temperature(step = (1.0/boltzmann_decay_end_state))
     # self.training_agent.T = np.maximum(self.training_agent.T * 
     #                                    (1.0/boltzmann_decay_end_state), 
     #                                    1) 
 
-    path = self.file_config["path"]
-    directory = self.file_config["directory"]
+    path_and_directory = 'C:\\Users\\syslab123\\Desktop\\Act to Reason - Original\\Act-to-reason-original\\training_data_results'
+    #directory = self.file_config["directory"]
     #Save the weights at the end of each 100 episodes
-    fname = './'+path+directory+'/models/model'+str(state_no)
-    tfname = './'+path+directory+'/target_weights/target_weight'+str(state_no)+'.h5'
+    fname = './'+path_and_directory+'/models/model'+str(state_no)
+    tfname = './'+path_and_directory+'/target_weights/target_weight'+str(state_no)+'.h5'
 
     DynamicDQNAgent.save(fname,tfname, backup=True)
-    DynamicDQNAgent.save_memory(path+directory+
+    DynamicDQNAgent.save_memory(path_and_directory+
                                     "/agent_data/agent_memory"+str(state_no)+".pickle")
-    DynamicDQNAgent.save_config(total_timesteps, path+directory+
+    DynamicDQNAgent.save_config(total_timesteps, path_and_directory+
                                     "/agent_data/agent_config"+str(state_no)+".pickle")
 
-    state_no += 1
+    #state_no += 1
 
         
     real_final_step = EPISODE_DF.loc[(EPISODE_DF['Local_Y']<=Params.end_for_car0)&(EPISODE_DF['Vehicle_ID']==EGO_ID)]
@@ -474,8 +548,9 @@ def run_episode(final_state_df, run_no, save_dir=""):
     new_episode_df = new_episode_df.loc[new_episode_df['Frame_ID']<=(frame_id+SKIP_FRAMES)]
     new_episode_df.to_csv(EXP_RES_DIR+"/"+save_dir+str(run_no)+".csv", 
                           index = None, 
-                          header=True);
+                          header=True)
 
+    counter += 1
     return final_state_df
 
 def run_section(final_state_df, run_no, save_dir=""): 
@@ -629,7 +704,7 @@ def load_dynamic_model():
     DYNAMIC_AGENT.random_dynamic_strategy = ENABLE_RANDOM_DYNAMIC_STRATEGY
 
 def main():
-    simulate_episode = False
+    train_episode = True
    # simulate_section = True
     
     experiment_titles = ["some_title/"]
@@ -637,7 +712,7 @@ def main():
     model_dynamic_list = [99]
 
     #num_runs = 20
-    num_runs = 1
+    num_runs = 1 
 
     directory = DATA_PATH+"NGSIM_I80_quadruplets/"
     
@@ -652,12 +727,15 @@ def main():
         model_dynamic = model_dynamic_list[idx_path] #model dynamic 99
         select_path(experiment_title, model_dynamic)
         load_dynamic_model()
+        state_no = 0
 
         # Select follower status
         for idx_follow, follower_status in enumerate(["no_followers/","with_followers/"]):
             print("\n"+follower_status)
             Path("./"+EXP_RES_DIR+"/"+follower_status).mkdir(parents=True, exist_ok=True)
             
+            
+
             # Select ego initial status
             for idx_ego, ego_init_status in enumerate(["vs_always6/","vs_startsat7/"]): #makes sense 
                 print("\n"+ego_init_status)
@@ -712,16 +790,17 @@ def main():
                                                   header=True)
                             del final_state_df
                     """        
-                    if simulate_episode:
+                    if train_episode:
                         final_state_df = pd.DataFrame(columns=FINAL_STATE_DF_COLUMNS)                
                         Path("./"+EXP_RES_DIR+"/"+save_dir+"runs/").mkdir(parents=True,
                                                                   exist_ok=True)
                         # Iterate run
                         for run_no in range(num_runs):
-                            print("Run no: "+str(run_no))
+                            print("Run / episode no: "+str(run_no))
                             final_state_df = run_episode(save_dir = save_dir+"runs/", 
                                                     final_state_df = final_state_df,
-                                                    run_no = run_no)
+                                                    run_no = run_no, state_no = state_no)
+                            state_no += 1
                         
                         final_state_df.to_csv(EXP_RES_DIR+"/"+save_dir+"final_state.csv", 
                                               index = None, 
