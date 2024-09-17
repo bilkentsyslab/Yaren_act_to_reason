@@ -12,7 +12,7 @@ import random
 import numpy as np
 from scipy.special import softmax
 from keras.callbacks import LearningRateScheduler #to change the learning rate dynamically
-#import gc
+import gc
 
 # import tensorflow as tf
 # tf.set_random_seed(0)
@@ -114,9 +114,9 @@ class DynamicDQNAgent:
                     except KeyError:
                         print(f"Agent {i+1} does not exist in self.agentlevk")
                         
-                return [["Random-Strategy", random_strategy], levk_qvals]
+                return [["Random-Strategy "+ str(random_strategy), random_strategy], levk_qvals]
             else:
-                return [["Random-Strategy", random_strategy], self.agentlevk[random_strategy].act(
+                return [["Random-Strategy "+ str(random_strategy), random_strategy], self.agentlevk[random_strategy].act(
                     state=state[:, :, 0:self.state_size], remove_merging=remove_merging)]
         else:
             q_values = self.model(state)[0].numpy()
@@ -271,7 +271,7 @@ class DynamicDQNAgent:
 
 
     #Experience replay
-    def replay(self, batch_size, state_no):
+    def replay(self, batch_size):
         batch_size = min(batch_size, len(self.memory))
         minibatch = np.array(random.sample(self.memory, batch_size), dtype="object")
         
@@ -298,18 +298,15 @@ class DynamicDQNAgent:
         Y[np.arange(batch_size), actions] = updates.squeeze()
 
         # Fit the model with the updated targets
-        if (state_no %20 == 0  and state_no != 20):
-            callback = tf.keras.callbacks.LearningRateScheduler(self.scheduler1, verbose= 1)
-        else:
-            callback = tf.keras.callbacks.LearningRateScheduler(self.scheduler, verbose= 1)
+        #if ((state_no+10) %20 == 0  and state_no != 10 and state_no):
+        #    callback = tf.keras.callbacks.LearningRateScheduler(self.scheduler1, verbose= 1)
+        #else:
+        #callback = tf.keras.callbacks.LearningRateScheduler(self.scheduler1, verbose= 1)
 
+        #history = self.model.fit(X, Y, batch_size=batch_size, epochs=1, callbacks=[callback],  verbose=0)
 
-       
+        history = self.model.fit(X, Y, batch_size=batch_size, epochs=1,  verbose=0)
 
-
-        history = self.model.fit(X, Y, batch_size=batch_size, epochs=1, callbacks=[callback],  verbose=0)
-        #gc.collect()
-        #tf.keras.backend.clear_session()
 
         return history.history['loss']
     
@@ -335,8 +332,8 @@ class DynamicDQNAgent:
         with open(fname, "rb") as input_file:
             self.memory = pickle.load(input_file)
     
-    def save_memory(self,fname):
-        with open(fname, "wb") as output_file:
+    def save_memory(self,fname, run_no):
+        with open(fname + 'run_no_' + str(run_no), "wb") as output_file:
             pickle.dump(self.memory, output_file)
             
     #Loads the Boltzmann temperature and total timesteps
@@ -347,8 +344,8 @@ class DynamicDQNAgent:
         return total_timesteps
     
     #Saves the last Boltzmann temperature and total timesteps
-    def save_config(self, total_timesteps, config_fname):
-        with open(config_fname, "wb") as output_file:
+    def save_config(self, total_timesteps, config_fname, run_no):
+        with open(config_fname + 'run_no_' + str(run_no),  "wb") as output_file:
             # pickle.dump([self.T,self.epsilon, total_timesteps], output_file)
             pickle.dump([self.T, total_timesteps], output_file)
             
@@ -359,7 +356,7 @@ class DynamicDQNAgent:
             self.target_model.load_weights(tfname) 
             
     #Saves the model, and the target weights for retraining
-    def save(self, fname, tfname="", backup = False):
-        self.model.save(fname)
+    def save(self, fname, run_no,  tfname="",  backup = False):
+        self.model.save(fname + 'run_no_' + str(run_no))
         if backup:
             self.target_model.save_weights(tfname)
