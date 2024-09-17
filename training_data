@@ -250,22 +250,24 @@ def remember_frame(currentstate, actionget, nextstate, reward, done,
 
         """
         # Dynamic ego
+        state_size = 9
         temp_nextstate = nextstate.copy()
         nextstate = currentstate.copy()
         if Params.dynamic_history_action:
             scale_action = 1.0 if not Params.scale_action else (Params.num_actions-1.0)
-            nextstate_concat = np.concatenate((nextstate[0,0,:Params.num_actions].copy(),
+            nextstate_concat = np.concatenate((nextstate[0,0,:state_size].copy(),
                                                 [actionget/scale_action],
-                                                nextstate[0,0,Params.num_actions:-state_size].copy()))
-            nextstate[0,0,Params.num_actions:] = nextstate_concat
+                                                nextstate[0,0,state_size:-10].copy()))
+            nextstate[0,0,state_size:] = nextstate_concat
         else:
-            nextstate[0,0,Params.num_actions:] = nextstate[0,0,:-Params.num_actions].copy()
-        nextstate[:,:, :Params.num_actions] = temp_nextstate.copy()
+            nextstate[0,0,state_size:] = nextstate[0,0,:-state_size].copy()
+        nextstate[:,:, :state_size] = temp_nextstate.copy()
         DYNAMIC_AGENT.remember(currentstate, 
                                         dynamic_actionget, 
                                         reward, nextstate, 
                                         (done or ego_reached_end))
-    
+ 
+
 def get_reward(crash, nextstate, ego_velocity, ego_lane, fc_d, dist_end_merging, x_sim, x_data, lane_sim, lane_data):
     performance = 1.0
     scale = 1.0 # 0.02
@@ -462,13 +464,13 @@ def get_real_final_step():
 #    
 #    SECTION_DF = EPISODE_DF.loc[(EPISODE_DF['Frame_ID']>=start_frame)&(EPISODE_DF['Frame_ID']<(start_frame+SECTION_DUR*SAMPLING_FREQ))]
     
-def run_episode(final_state_df,  state_no, run_no, save_dir="", ): 
+def run_episode(final_state_df,  episode_no, run_no, save_dir="", ): 
     ego_dyn_state = np.zeros((1,1,DYNAMIC_STATE_SIZE))
     hist_action_size = int(Params.dynamic_history_action)
     counter = 0
     total_timesteps = 0 
     state_size = 10
-    state_no = state_no
+    episode_no = episode_no
     actionget = 0
     ego_df_columns = EGO_DF_DYN_COLS                    
     new_episode_df = EPISODE_DF.copy()
@@ -476,7 +478,7 @@ def run_episode(final_state_df,  state_no, run_no, save_dir="", ):
     ego_df = EPISODE_DF.loc[EPISODE_DF['Vehicle_ID']==EGO_ID].iloc[[0]].copy()
     ego_len = ego_df['Vehicle_Length'].item()
     
-    frames = EPISODE_DF[EPISODE_DF.duplicated(subset='Frame_ID',keep='first')==False].Frame_ID;
+    frames = EPISODE_DF[EPISODE_DF.duplicated(subset='Frame_ID',keep='first')==False].Frame_ID; #TODO
 
     prev_frame_id = frames.iloc[0]
     for frame_id in frames:
@@ -577,14 +579,17 @@ def run_episode(final_state_df,  state_no, run_no, save_dir="", ):
                                             state_size = Params.num_observations,
                                             dynamic_actionget = dynamic_actionget)
             current_training_loss = 0
-            if total_timesteps > Training.replay_start_size and total_timesteps % 4 == 0:
-                    current_training_loss = DYNAMIC_AGENT.replay(Training.batch_size, state_no)[0] #Experience replay #not suree
+            replay_start_size = 5000
+            batch_size = 32
+            if total_timesteps > replay_start_size and total_timesteps % 4 == 0: #TODO
+                    current_training_loss = DYNAMIC_AGENT.replay(batch_size)[0] #Experience replay #not suree
 
                 
            
         
             # Update Target Network every target_up steps
-            if total_timesteps % Training.target_up == 0:
+            target_up = 1000
+            if total_timesteps % target_up == 0:
                 DYNAMIC_AGENT.update_target_model()          
                                 
                     
@@ -616,25 +621,25 @@ def run_episode(final_state_df,  state_no, run_no, save_dir="", ):
         else:
             print("Ego DID NOT reach the end")
         print("****************************************"+'\n', end = '\n')   
-
-    DynamicDQNAgent.update_temperature(step = (1.0/boltzmann_decay_end_state))
+    boltzmann_decay_end_state = 50
+    DYNAMIC_AGENT.update_temperature(step = (1.0/boltzmann_decay_end_state))
     # self.training_agent.T = np.maximum(self.training_agent.T * 
     #                                    (1.0/boltzmann_decay_end_state), 
     #                                    1) 
 
-    path_and_directory = 'C:\\Users\\syslab123\\Desktop\\Act to Reason - Original\\Act-to-reason-original\\training_data_results'
+    path_and_directory = DATA_PATH
     #directory = self.file_config["directory"]
     #Save the weights at the end of each 100 episodes
-    fname = './'+path_and_directory+'/models/model'+str(state_no)
-    tfname = './'+path_and_directory+'/target_weights/target_weight'+str(state_no)+'.h5'
+    fname = path_and_directory+'/models/model'+str(episode_no)
+    tfname = path_and_directory+'/target_weights/target_weight'+str(episode_no)+'.h5'
 
-    DynamicDQNAgent.save(fname,tfname, backup=True)
-    DynamicDQNAgent.save_memory(path_and_directory+
-                                    "/agent_data/agent_memory"+str(state_no)+".pickle")
-    DynamicDQNAgent.save_config(total_timesteps, path_and_directory+
-                                    "/agent_data/agent_config"+str(state_no)+".pickle")
+    DYNAMIC_AGENT.save(fname, run_no, tfname,   backup=True)
+    DYNAMIC_AGENT.save_memory(path_and_directory+
+                                    "/agent_data/agent_memory"+str(episode_no)+".pickle" ,run_no)
+    DYNAMIC_AGENT.save_config(total_timesteps, path_and_directory+
+                                    "/agent_data/agent_config"+str(episode_no)+".pickle", run_no)
 
-    #state_no += 1
+    #episode_no += 1
 
         
     real_final_step = EPISODE_DF.loc[(EPISODE_DF['Local_Y']<=Params.end_for_car0)&(EPISODE_DF['Vehicle_ID']==EGO_ID)]
@@ -809,7 +814,7 @@ def main():
     model_dynamic_list = [99]
 
     #num_runs = 20
-    num_runs = 1 
+    num_runs = 20
 
     directory = DATA_PATH+"NGSIM_I80_quadruplets/"
     
@@ -817,14 +822,14 @@ def main():
     #skip_egos = [146,164,1066,1173,1193,1214,1340,1554,1559,1563,1666,1716,1724,1778,1922,2168]
     skip_egos = []
     # skip_egos = [146,164,375,376,491,798,1066,1173,1193,1214,1340,1554,1559,1563,1666,1716,1724,1778,1922,2168,2187,2344,2354,2782,2799,3006,3051,3097]
-    
+
     # Select and load dynamic model
     for idx_path, experiment_title in enumerate(experiment_titles):
         print("\n"+experiment_title)
         model_dynamic = model_dynamic_list[idx_path] #model dynamic 99
         select_path(experiment_title, model_dynamic)
         load_dynamic_model()
-        state_no = 0
+        episode_no = 0
 
         # Select follower status
         for idx_follow, follower_status in enumerate(["no_followers/","with_followers/"]):
@@ -896,8 +901,8 @@ def main():
                             print("Run / episode no: "+str(run_no))
                             final_state_df = run_episode(save_dir = save_dir+"runs/", 
                                                     final_state_df = final_state_df,
-                                                    run_no = run_no, state_no = state_no)
-                            state_no += 1
+                                                    run_no = run_no, episode_no = episode_no)
+                            print
                         
                         final_state_df.to_csv(EXP_RES_DIR+"/"+save_dir+"final_state.csv", 
                                               index = None, 
